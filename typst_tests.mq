@@ -1,0 +1,230 @@
+include "test"
+| include "typst"
+|
+
+# -- Heading Tests --
+
+# @parametrize([
+#   ["= Title", 1, "Title"],
+#   ["=== Sub section", 3, "Sub section"],
+# ])
+def test_parse_heading(input, level, text):
+  let result = typst_parse(input)
+  | assert_eq(result, [{"type": "heading", "level": level, "text": text}])
+end
+
+def test_parse_heading_trims_text():
+  let result = typst_parse("=   Spaced   ")
+  | assert_eq(result[0]["text"], "Spaced")
+end
+
+def test_parse_multiple_headings():
+  let result = typst_parse("= One\n== Two\n= Three")
+  | assert_eq(len(result), 3)
+  | assert_eq(result[0]["level"], 1)
+  | assert_eq(result[1]["level"], 2)
+  | assert_eq(result[2]["level"], 1)
+end
+
+# -- Paragraph Tests --
+
+def test_parse_single_paragraph():
+  let result = typst_parse("Hello, world!")
+  | assert_eq(result, [{"type": "text", "text": "Hello, world!"}])
+end
+
+def test_parse_multiline_paragraph_joined():
+  let result = typst_parse("Line one\nLine two")
+  | assert_eq(result, [{"type": "text", "text": "Line one\nLine two"}])
+end
+
+def test_parse_paragraphs_split_by_blank_line():
+  let result = typst_parse("First para.\n\nSecond para.")
+  | assert_eq(len(result), 2)
+  | assert_eq(result[0]["text"], "First para.")
+  | assert_eq(result[1]["text"], "Second para.")
+end
+
+def test_parse_heading_then_paragraph():
+  let result = typst_parse("= Title\nBody text.")
+  | assert_eq(len(result), 2)
+  | assert_eq(result[0]["type"], "heading")
+  | assert_eq(result[1]["type"], "text")
+end
+
+# -- Call Statement Tests --
+
+def test_parse_call_no_args():
+  let result = typst_parse("#pagebreak()")
+  | assert_eq(result, [{"type": "call", "name": "pagebreak", "args": [], "named": dict(), "content": []}])
+end
+
+def test_parse_call_positional_args():
+  let result = typst_parse("#image(\"a.png\")")
+  | assert_eq(result[0]["name"], "image")
+  | assert_eq(result[0]["args"], ["a.png"])
+end
+
+# @parametrize([
+#   ["#min(1, 2, 3)", [1, 2, 3]],
+#   ["#min(1, 2, 3,)", [1, 2, 3]],
+# ])
+def test_parse_call_positional_args_list(input, expected_args):
+  let result = typst_parse(input)
+  | assert_eq(result[0]["args"], expected_args)
+end
+
+def test_parse_call_named_args():
+  let result = typst_parse("#text(size: 12, fill: \"red\")")
+  | assert_eq(result[0]["named"]["size"], 12)
+  | assert_eq(result[0]["named"]["fill"], "red")
+end
+
+def test_parse_call_mixed_args():
+  let result = typst_parse("#rect(width: 10, \"unnamed\")")
+  | assert_eq(result[0]["args"], ["unnamed"])
+  | assert_eq(result[0]["named"]["width"], 10)
+end
+
+def test_parse_nested_call():
+  let result = typst_parse("#figure(image(\"a.png\"))")
+  | let inner = result[0]["args"][0]
+  | assert_eq(inner["type"], "call")
+  | assert_eq(inner["name"], "image")
+  | assert_eq(inner["args"], ["a.png"])
+end
+
+def test_parse_call_with_trailing_content_block():
+  let result = typst_parse("#figure(image(\"a.png\"))[A cat]")
+  | assert_eq(result[0]["name"], "figure")
+  | assert_eq(len(result[0]["content"]), 1)
+  | assert_eq(result[0]["content"][0]["text"], "A cat")
+end
+
+def test_parse_call_with_named_content_arg():
+  let result = typst_parse("#figure(image(\"a.png\"), caption: [A cat])")
+  | assert_eq(result[0]["named"]["caption"]["type"], "content")
+  | assert_eq(result[0]["named"]["caption"]["text"], "A cat")
+end
+
+# -- Value Literal Tests --
+
+# @parametrize([
+#   ["#set(a: true, b: false)", "a", true],
+#   ["#set(a: true, b: false)", "b", false],
+# ])
+def test_parse_call_boolean_args(input, key, expected):
+  let result = typst_parse(input)
+  | assert_eq(result[0]["named"][key], expected)
+end
+
+def test_parse_call_none_arg():
+  let result = typst_parse("#f(none)")
+  | assert_none(result[0]["args"][0])
+end
+
+def test_parse_call_ident_arg():
+  let result = typst_parse("#f(myvar)")
+  | assert_eq(result[0]["args"][0], {"type": "ident", "name": "myvar"})
+end
+
+def test_parse_call_float_arg():
+  let result = typst_parse("#f(3.14)")
+  | assert_eq(result[0]["args"][0], 3.14)
+end
+
+def test_parse_call_negative_number():
+  let result = typst_parse("#f(-5)")
+  | assert_eq(result[0]["args"][0], -5)
+end
+
+# @parametrize([
+#   ["#f(10pt)", {"type": "length", "value": 10, "unit": "pt"}],
+#   ["#f(50%)", {"type": "length", "value": 50, "unit": "%"}],
+# ])
+def test_parse_call_length_arg(input, expected):
+  let result = typst_parse(input)
+  | assert_eq(result[0]["args"][0], expected)
+end
+
+# -- Array / Dict Literal Tests --
+
+def test_parse_array_literal():
+  let result = typst_parse("#(1, 2, 3)")
+  | assert_eq(result, [{"type": "array", "items": [1, 2, 3]}])
+end
+
+def test_parse_dict_literal():
+  let result = typst_parse("#(r: 1, g: 0, b: 0)")
+  | assert_eq(result[0]["type"], "dict")
+  | assert_eq(result[0]["entries"]["r"], 1)
+  | assert_eq(result[0]["entries"]["g"], 0)
+end
+
+def test_parse_empty_dict_literal():
+  let result = typst_parse("#(:)")
+  | assert_eq(result, [{"type": "dict", "entries": dict()}])
+end
+
+def test_parse_nested_array_in_call():
+  let result = typst_parse("#f((1, 2))")
+  | assert_eq(result[0]["args"][0], {"type": "array", "items": [1, 2]})
+end
+
+# -- String Escape Tests --
+
+# @parametrize([
+#   ["#f(\"a\\nb\")", "a\nb"],
+#   ["#f(\"say \\\"hi\\\"\")", "say \"hi\""],
+#   ["#f(\"\\u{41}\")", "A"],
+# ])
+def test_parse_string_escape(input, expected):
+  let result = typst_parse(input)
+  | assert_eq(result[0]["args"][0], expected)
+end
+
+# -- Fallback / Raw Tests --
+
+def test_parse_unsupported_let_falls_back_to_raw():
+  let result = typst_parse("#let x = 5")
+  | assert_eq(result, [{"type": "raw", "text": "let x = 5"}])
+end
+
+def test_parse_unsupported_show_falls_back_to_raw():
+  let result = typst_parse("#show heading: it => it")
+  | assert_eq(result[0]["type"], "raw")
+end
+
+# -- Mixed Document Test --
+
+def test_parse_full_document():
+  let input = "= Report\n\nIntro paragraph.\n\n#figure(image(\"chart.png\"), caption: [Sales])\n\n== Details\nMore text."
+  | let result = typst_parse(input)
+  | assert_eq(len(result), 5)
+  | assert_eq(result[0], {"type": "heading", "level": 1, "text": "Report"})
+  | assert_eq(result[1]["text"], "Intro paragraph.")
+  | assert_eq(result[2]["name"], "figure")
+  | assert_eq(result[3]["level"], 2)
+  | assert_eq(result[4]["text"], "More text.")
+end
+
+# -- Helper Function Tests --
+
+def test_heading_level_counts_equals():
+  let result = _tp_heading_level("=== text")
+  | assert_eq(result, 3)
+end
+
+def test_hex_to_int():
+  let result = _tp_hex_to_int("ff")
+  | assert_eq(result, 255)
+end
+
+# @parametrize([
+#   ["hello", "hello"],
+#   ["\\u{48}\\u{49}", "HI"],
+# ])
+def test_unescape(input, expected):
+  let result = _tp_unescape(input)
+  | assert_eq(result, expected)
+end

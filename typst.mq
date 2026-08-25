@@ -1,0 +1,334 @@
+# Typst markup parser in mq
+# https://typst.app/docs/reference/syntax/
+#
+# Supports a practical subset of Typst syntax: headings (`= ...`) and
+# single-line statements (`#name(...)`), including nested calls, named
+# arguments, arrays, dicts, and trailing content blocks (`[...]`).
+# Anything else (multi-line statements, `#let`/`#show`/`#import`, code
+# blocks, math mode, ...) is preserved verbatim as a "raw" or "text" node.
+
+def _tp_hex_digit(c):
+  let cp = first(explode(c))
+  | if (cp >= 48 && cp <= 57): cp - 48
+    elif (cp >= 65 && cp <= 70): cp - 55
+    elif (cp >= 97 && cp <= 102): cp - 87
+    else: error("typst: invalid hex digit: " + c)
+end
+
+def _tp_hex_to_int(hex):
+  fold(to_array(downcase(hex)), 0, ->(acc, c): acc * 16 + _tp_hex_digit(c);)
+end
+
+def _tp_unescape(s):
+  var result = ""
+  | var i = 0
+  | let n = len(s)
+  | let _ = while (i < n):
+      if (s[i] != "\\"):
+        do result = result + s[i] | i += 1 | result;
+      elif (i + 1 >= n):
+        error("typst: unexpected end of escape sequence")
+      elif (s[i + 1] == "n"):
+        do result = result + "\n" | i += 2 | result;
+      elif (s[i + 1] == "t"):
+        do result = result + "\t" | i += 2 | result;
+      elif (s[i + 1] == "r"):
+        do result = result + "\r" | i += 2 | result;
+      elif (s[i + 1] == "\\"):
+        do result = result + "\\" | i += 2 | result;
+      elif (s[i + 1] == "\""):
+        do result = result + "\"" | i += 2 | result;
+      elif (s[i + 1] == "u" && i + 2 < n && s[i + 2] == "{"):
+        do
+          var j = i + 3
+          | let _ = while (j < n && s[j] != "}"): j += 1 end
+          | if (j >= n):
+              error("typst: unterminated unicode escape")
+            else:
+              do
+                let hex = s[i + 3:j]
+                | let cp = _tp_hex_to_int(hex)
+                | result = result + implode([cp])
+                | i = j + 1
+                | result
+              end
+        end
+      else:
+        do result = result + s[i + 1] | i += 2 | result;
+    end
+  | result
+end
+
+def _tp_lex(s):
+  var pos = 0
+  | var tokens = []
+  | let n = len(s)
+  | let _ = while (pos < n):
+      let c = s[pos]
+      | if (c == " " || c == "\t"):
+          do pos += 1 | tokens end
+        elif (c == "("):
+          do tokens += [{"t": "lp"}] | pos += 1 | tokens;
+        elif (c == ")"):
+          do tokens += [{"t": "rp"}] | pos += 1 | tokens;
+        elif (c == ":"):
+          do tokens += [{"t": "col"}] | pos += 1 | tokens;
+        elif (c == ","):
+          do tokens += [{"t": "com"}] | pos += 1 | tokens;
+        elif (c == "\""):
+          do
+            var str_buf = ""
+            | var str_done = false
+            | pos += 1
+            | let _ = while (pos < n && !str_done):
+                          if (s[pos] == "\""):
+                            do str_done = true | str_buf end
+                          elif (s[pos] == "\\"):
+                            do
+                              let nc = if (pos + 1 < n): s[pos + 1] else: ""
+                              | str_buf = str_buf + "\\" + nc
+                              | pos += if (pos + 1 < n): 2 else: 1
+                              | str_buf
+                            end
+                          else:
+                            do str_buf = str_buf + s[pos] | pos += 1 | str_buf end
+                        end
+            | pos += 1
+            | tokens += [{"t": "str", "v": _tp_unescape(str_buf)}]
+            | tokens
+          end
+        elif (c == "["):
+          do
+            var depth = 1
+            | var j = pos + 1
+            | let _ = while (j < n && depth > 0):
+                          if (s[j] == "["):
+                            do depth += 1 | j += 1 end
+                          elif (s[j] == "]"):
+                            do depth -= 1 | j += 1 end
+                          else:
+                            do j += 1 end
+                        end
+            | if (depth != 0):
+                error("typst: unterminated content block")
+              else:
+                do
+                  tokens += [{"t": "content", "v": trim(s[pos + 1:j - 1])}]
+                  | pos = j
+                  | tokens
+                end
+          end
+        elif (is_regex_match(slice(s, pos, n), "^[+-]?(?:[0-9]*\\.[0-9]+|[0-9]+\\.[0-9]*|[0-9]+)")):
+          do
+            let m = first(regex_match(slice(s, pos, n), "^[+-]?(?:[0-9]*\\.[0-9]+|[0-9]+\\.[0-9]*|[0-9]+)"))
+            | let rest = slice(s, pos + len(m), n)
+            | let um = if (is_regex_match(rest, "^(%|[a-zA-Z]+)")): first(regex_match(rest, "^(%|[a-zA-Z]+)")) else: ""
+            | tokens += [{"t": "num", "v": m, "u": um}]
+            | pos += len(m) + len(um)
+            | tokens
+          end
+        elif (is_regex_match(slice(s, pos, n), "^[a-zA-Z_][a-zA-Z0-9_]*")):
+          do
+            let m = first(regex_match(slice(s, pos, n), "^[a-zA-Z_][a-zA-Z0-9_]*"))
+            | tokens += [{"t": "id", "v": m}]
+            | pos += len(m)
+            | tokens
+          end
+        else:
+          error("typst: unexpected character: " + c)
+    end
+  | tokens
+end
+
+def _tp_peek(tokens, pos):
+  if (pos >= len(tokens)): None
+  else: tokens[pos]
+end
+
+def _tp_tok_type(tok):
+  if (is_none(tok)): "eof"
+  else: tok["t"]
+end
+
+def _tp_parse_arglist(tokens, pos, endtype):
+  var cur = pos
+  | var positional = []
+  | var named = dict()
+  | var done = false
+  | let _ = while (!done):
+      let tt = _tp_tok_type(_tp_peek(tokens, cur))
+      | if (tt == endtype):
+          do done = true | positional end
+        elif (tt == "eof"):
+          error("typst: unexpected end of arguments")
+        elif (tt == "id" && _tp_tok_type(_tp_peek(tokens, cur + 1)) == "col"):
+          do
+            let key = _tp_peek(tokens, cur)["v"]
+            | let r = _tp_parse_value(tokens, cur + 2)
+            | named = set(named, key, r[1])
+            | cur = r[0]
+            | let tt2 = _tp_tok_type(_tp_peek(tokens, cur))
+            | if (tt2 == "com"):
+                do cur += 1 | positional end
+              elif (tt2 == endtype):
+                positional
+              else:
+                error("typst: expected ',' or closing token after named argument")
+          end
+        else:
+          do
+            let r = _tp_parse_value(tokens, cur)
+            | positional += [r[1]]
+            | cur = r[0]
+            | let tt2 = _tp_tok_type(_tp_peek(tokens, cur))
+            | if (tt2 == "com"):
+                do cur += 1 | positional end
+              elif (tt2 == endtype):
+                positional
+              else:
+                error("typst: expected ',' or closing token after argument")
+          end
+    end
+  | if (_tp_tok_type(_tp_peek(tokens, cur)) == endtype):
+      [cur + 1, positional, named]
+    else:
+      error("typst: expected closing token")
+end
+
+def _tp_parse_group(tokens, pos):
+  if (_tp_tok_type(_tp_peek(tokens, pos)) == "col" && _tp_tok_type(_tp_peek(tokens, pos + 1)) == "rp"):
+    [pos + 2, {"type": "dict", "entries": dict()}]
+  else:
+    do
+      let r = _tp_parse_arglist(tokens, pos, "rp")
+      | if (is_empty(r[2])):
+          [r[0], {"type": "array", "items": r[1]}]
+        else:
+          [r[0], {"type": "dict", "entries": r[2]}]
+    end
+end
+
+def _tp_parse_call(tokens, pos):
+  let name = _tp_peek(tokens, pos)["v"]
+  | let r = _tp_parse_arglist(tokens, pos + 2, "rp")
+  | var cur = r[0]
+  | var content = []
+  | var more = true
+  | let _ = while (more):
+      if (_tp_tok_type(_tp_peek(tokens, cur)) == "content"):
+        do content += [{"type": "content", "text": _tp_peek(tokens, cur)["v"]}] | cur += 1 | content;
+      else:
+        do more = false | content end
+    end
+  | [cur, {"type": "call", "name": name, "args": r[1], "named": r[2], "content": content}]
+end
+
+def _tp_parse_value(tokens, pos):
+  let tok = _tp_peek(tokens, pos)
+  | let tt = _tp_tok_type(tok)
+  | if (tt == "str"):
+      [pos + 1, tok["v"]]
+    elif (tt == "num" && tok["u"] == ""):
+      [pos + 1, to_number(tok["v"])]
+    elif (tt == "num"):
+      [pos + 1, {"type": "length", "value": to_number(tok["v"]), "unit": tok["u"]}]
+    elif (tt == "content"):
+      [pos + 1, {"type": "content", "text": tok["v"]}]
+    elif (tt == "id" && tok["v"] == "true"):
+      [pos + 1, true]
+    elif (tt == "id" && tok["v"] == "false"):
+      [pos + 1, false]
+    elif (tt == "id" && tok["v"] == "none"):
+      [pos + 1, None]
+    elif (tt == "id" && _tp_tok_type(_tp_peek(tokens, pos + 1)) == "lp"):
+      _tp_parse_call(tokens, pos)
+    elif (tt == "id"):
+      [pos + 1, {"type": "ident", "name": tok["v"]}]
+    elif (tt == "lp"):
+      _tp_parse_group(tokens, pos + 1)
+    elif (tt == "eof"):
+      error("typst: unexpected end of expression")
+    else:
+      error("typst: unexpected token: " + tt)
+end
+
+def _tp_parse_statement(text):
+  try:
+    do
+      let tokens = _tp_lex(text)
+      | if (is_empty(tokens)):
+          {"type": "raw", "text": text}
+        else:
+          do
+            let r = _tp_parse_value(tokens, 0)
+            | if (r[0] != len(tokens)):
+                error("typst: unexpected trailing tokens")
+              elif (is_dict(r[1])):
+                r[1]
+              else:
+                {"type": "expr", "value": r[1]}
+          end
+    end
+  catch(e):
+    {"type": "raw", "text": text}
+end
+
+def _tp_heading_level(t):
+  var i = 0
+  | let n = len(t)
+  | let _ = while (i < n && t[i] == "="): i += 1 end
+  | i
+end
+
+def _tp_flush_paragraph(buf):
+  if (is_empty(buf)): None
+  else: {"type": "text", "text": join(buf, "\n")}
+end
+
+# Parses a subset of Typst markup into an array of structured nodes:
+# `{"type": "heading", "level": N, "text": ...}`,
+# `{"type": "call", "name": ..., "args": [...], "named": {...}, "content": [...]}`,
+# `{"type": "text", "text": ...}` (paragraphs), or
+# `{"type": "raw", "text": ...}` (anything that couldn't be parsed as a statement).
+def typst_parse(input):
+  let lines = map(split(to_string(input), "\n"), ->(l): rtrimstr(l, "\r");)
+  | var out = []
+  | var buf = []
+  | var i = 0
+  | let n = len(lines)
+  | let _ = while (i < n):
+      let t = trim(lines[i])
+      | if (is_empty(t)):
+          do
+            let p = _tp_flush_paragraph(buf)
+            | out = if (is_none(p)): out else: out + [p]
+            | buf = []
+            | i += 1
+            | out
+          end
+        elif (is_regex_match(t, "^=+(\\s|$)")):
+          do
+            let p = _tp_flush_paragraph(buf)
+            | out = if (is_none(p)): out else: out + [p]
+            | buf = []
+            | let level = _tp_heading_level(t)
+            | let text = trim(t[level:len(t)])
+            | out += [{"type": "heading", "level": level, "text": text}]
+            | i += 1
+            | out
+          end
+        elif (starts_with(t, "#")):
+          do
+            let p = _tp_flush_paragraph(buf)
+            | out = if (is_none(p)): out else: out + [p]
+            | buf = []
+            | out += [_tp_parse_statement(t[1:len(t)])]
+            | i += 1
+            | out
+          end
+        else:
+          do buf += [t] | i += 1 | out end
+    end
+  | let p = _tp_flush_paragraph(buf)
+  | if (is_none(p)): out else: out + [p]
+end

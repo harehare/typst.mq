@@ -4,10 +4,7 @@ include "test"
 
 # -- Heading Tests --
 
-# @parametrize([
-#   ["= Title", 1, "Title"],
-#   ["=== Sub section", 3, "Sub section"],
-# ])
+# @parametrize([["= Title", 1, "Title"], ["=== Sub section", 3, "Sub section"]])
 def test_parse_heading(input, level, text):
   let result = typst_parse(input)
   | assert_eq(result, [{"type": "heading", "level": level, "text": text}])
@@ -65,10 +62,7 @@ def test_parse_call_positional_args():
   | assert_eq(result[0]["args"], ["a.png"])
 end
 
-# @parametrize([
-#   ["#min(1, 2, 3)", [1, 2, 3]],
-#   ["#min(1, 2, 3,)", [1, 2, 3]],
-# ])
+# @parametrize([["#min(1, 2, 3)", [1, 2, 3]], ["#min(1, 2, 3,)", [1, 2, 3]]])
 def test_parse_call_positional_args_list(input, expected_args):
   let result = typst_parse(input)
   | assert_eq(result[0]["args"], expected_args)
@@ -109,10 +103,7 @@ end
 
 # -- Value Literal Tests --
 
-# @parametrize([
-#   ["#set(a: true, b: false)", "a", true],
-#   ["#set(a: true, b: false)", "b", false],
-# ])
+# @parametrize([["#set(a: true, b: false)", "a", true], ["#set(a: true, b: false)", "b", false]])
 def test_parse_call_boolean_args(input, key, expected):
   let result = typst_parse(input)
   | assert_eq(result[0]["named"][key], expected)
@@ -138,10 +129,7 @@ def test_parse_call_negative_number():
   | assert_eq(result[0]["args"][0], -5)
 end
 
-# @parametrize([
-#   ["#f(10pt)", {"type": "length", "value": 10, "unit": "pt"}],
-#   ["#f(50%)", {"type": "length", "value": 50, "unit": "%"}],
-# ])
+# @parametrize([["#f(10pt)", {"type": "length", "value": 10, "unit": "pt"}], ["#f(50%)", {"type": "length", "value": 50, "unit": "%"}]])
 def test_parse_call_length_arg(input, expected):
   let result = typst_parse(input)
   | assert_eq(result[0]["args"][0], expected)
@@ -173,11 +161,7 @@ end
 
 # -- String Escape Tests --
 
-# @parametrize([
-#   ["#f(\"a\\nb\")", "a\nb"],
-#   ["#f(\"say \\\"hi\\\"\")", "say \"hi\""],
-#   ["#f(\"\\u{41}\")", "A"],
-# ])
+# @parametrize([["#f(\"a\\nb\")", "a\nb"], ["#f(\"say \\\"hi\\\"\")", "say \"hi\""], ["#f(\"\\u{41}\")", "A"]])
 def test_parse_string_escape(input, expected):
   let result = typst_parse(input)
   | assert_eq(result[0]["args"][0], expected)
@@ -220,10 +204,7 @@ def test_hex_to_int():
   | assert_eq(result, 255)
 end
 
-# @parametrize([
-#   ["hello", "hello"],
-#   ["\\u{48}\\u{49}", "HI"],
-# ])
+# @parametrize([["hello", "hello"], ["\\u{48}\\u{49}", "HI"]])
 def test_unescape(input, expected):
   let result = _tp_unescape(input)
   | assert_eq(result, expected)
